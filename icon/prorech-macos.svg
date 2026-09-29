@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>ПРОРЕЧЬ, значок macOS (сетка 824 из 1024)</title>
+  <defs><clipPath id="plashka"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath></defs>
+  <g clip-path="url(#plashka)">
+    <rect x="100" y="100" width="824" height="824" fill="#0A0A0A"/>
+    <g transform="translate(100 100) scale(0.804688)">
+  
+  
+  <g fill="#FFFFFF">
+    <rect x="190" y="435" width="38" height="154" rx="19"/>
+    <rect x="264" y="366" width="38" height="292" rx="19"/>
+    <rect x="416" y="347" width="38" height="330" rx="19"/>
+    <rect x="490" y="420" width="38" height="184" rx="19"/>
+    <rect x="598" y="356" width="260" height="38" rx="19"/>
+    <rect x="598" y="474" width="224" height="38" rx="19"/>
+    <rect x="598" y="592" width="176" height="38" rx="19"/>
+  </g>
+  <rect x="338" y="282" width="42" height="460" rx="21" fill="#FF3B14"/>
+
+</g>
+  </g>
+</svg>

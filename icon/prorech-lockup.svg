@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="440" viewBox="0 0 1600 440">
+  <title>ПРОРЕЧЬ by Kirov Pro — горизонтальный логотип</title>
+  <rect width="1600" height="440" fill="#F2F2F0"/>
+  <rect x="56" y="48" width="343" height="343" rx="76" fill="#0A0A0A"/>
+  <g transform="translate(56 48) scale(.335)">
+    
+  <g fill="#FFFFFF">
+    <rect x="190" y="435" width="38" height="154" rx="19"/>
+    <rect x="264" y="366" width="38" height="292" rx="19"/>
+    <rect x="416" y="347" width="38" height="330" rx="19"/>
+    <rect x="490" y="420" width="38" height="184" rx="19"/>
+    <rect x="598" y="356" width="260" height="38" rx="19"/>
+    <rect x="598" y="474" width="224" height="38" rx="19"/>
+    <rect x="598" y="592" width="176" height="38" rx="19"/>
+  </g>
+  <rect x="338" y="282" width="42" height="460" rx="21" fill="#FF3B14"/>
+    <rect width="1024" height="1024" fill="none"/>
+  </g>
+  <text x="442" y="260" fill="#0A0A0A" font-family="Arial, sans-serif" font-size="208" font-weight="700" letter-spacing="-9">ПРОРЕЧЬ</text>
+  <text x="451" y="331" fill="#7A7A78" font-family="Arial, sans-serif" font-size="34" font-weight="700" letter-spacing="9">BY KIROV PRO</text>
+</svg>
