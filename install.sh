@@ -26,9 +26,10 @@ main() {
     echo "Нужна macOS 13 или новее, у вас $ver."; exit 1
   fi
 
-  local tmp
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  # Глобальная, а не local: ловушка EXIT срабатывает уже после выхода из main.
+  TMP_DIR="$(mktemp -d)"
+  trap 'rm -rf "${TMP_DIR:-}"' EXIT
+  local tmp="$TMP_DIR"
 
   echo "1/2 Скачиваю приложение"
   curl -fsSL -o "$tmp/app.zip" "https://github.com/$repo/releases/latest/download/Prorech.zip" </dev/null
@@ -51,7 +52,7 @@ main() {
       done
 
   echo
-  echo "Готово. «Расшифровка» лежит в папке $dest, открываю."
+  echo "Готово. ПРОРЕЧЬ лежит в папке $dest, открываю."
   open "$dest/ПРОРЕЧЬ.app"
 }
 
