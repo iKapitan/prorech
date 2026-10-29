@@ -55,6 +55,13 @@ fi
 # как новая встала целиком.
 [ -f "models/$GIGAAM/tokens.txt" ] && rm -rf "models/$GIGAAM_OLD"
 
+# Поиск пауз: запись распознаётся кусками между паузами (с версии 1.2).
+if [ ! -f models/silero_vad.onnx ]; then
+  shag "Скачиваю модель пауз, меньше 1 МБ"
+  skachat silero_vad.onnx "$REL/asr-models/silero_vad.onnx" \
+    9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6
+fi
+
 if [ ! -f "models/$SEG/model.onnx" ]; then
   shag "Скачиваю модель отрезков речи, 7 МБ"
   skachat seg.tar.bz2 "$REL/speaker-segmentation-models/$SEG.tar.bz2" \

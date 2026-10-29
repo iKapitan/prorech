@@ -27,8 +27,9 @@ curl -fsSL https://raw.githubusercontent.com/iKapitan/prorech/main/install.sh | 
 
 Нужен мак на macOS 13 или новее. На Apple Silicon (M1 и новее) работает быстрее всего.
 
-**Обновление с версии 1.0.** Та же команда установки ставит новое приложение. При первом
-запуске оно предложит докачать новую модель распознавания, около 170 МБ, старая удалится сама.
+**Обновление.** Та же команда установки ставит новую версию, история и словарь замен
+остаются. При первом запуске приложение докачает только то, чего не хватает: с 1.0 это
+новая модель распознавания, около 170 МБ (старая удалится сама), с 1.1 меньше мегабайта.
 
 ## Как пользоваться
 
@@ -70,18 +71,21 @@ curl -fsSL https://raw.githubusercontent.com/iKapitan/prorech/main/install.sh | 
 ```mermaid
 flowchart LR
   F[Запись] --> A[16 кГц, моно<br>afconvert macOS]
-  A --> B[Отрезки речи<br>pyannote 3.0]
-  B --> C[Кто говорит<br>TitaNet]
-  C --> D[Что сказано<br>GigaAM v3]
-  D --> E[Словарь замен]
+  A --> B[Кто говорит<br>pyannote 3.0 и TitaNet]
+  A --> P[Паузы<br>Silero VAD]
+  P --> D[Что сказано<br>GigaAM v3]
+  B --> G[Фраза целиком<br>одному говорящему]
+  D --> G
+  G --> E[Словарь замен]
   E --> T[Текст рядом с записью<br>и в истории]
 ```
 
 Окно написано на SwiftUI (`app/`), распознаёт движок на Python (`engine/prorech.py`)
-поверх библиотеки [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). Движок режет
-запись на отрезки речи, группирует их по голосам и распознаёт каждый отрезок кусками
-до 25 секунд. Модели скачиваются при установке с релизов sherpa-onnx и проверяются
-по контрольной сумме.
+поверх библиотеки [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). Движок отдельно
+размечает, где кто говорит, и отдельно распознаёт всю запись кусками между паузами,
+со временем каждого слова. Потом каждая фраза целиком отдаётся тому, кто произнёс
+большую её часть: реплика не рвётся посреди фразы между двумя людьми. Модели
+скачиваются при установке с релизов sherpa-onnx и проверяются по контрольной сумме.
 
 Движок можно запускать и без окна:
 
@@ -115,6 +119,7 @@ curl -fsSL https://raw.githubusercontent.com/iKapitan/prorech/main/uninstall.sh 
 | [GigaAM v3](https://github.com/salute-developers/GigaAM), распознавание речи со знаками препинания | Сбер | MIT |
 | [pyannote segmentation 3.0](https://huggingface.co/pyannote/segmentation-3.0), отрезки речи | pyannote | MIT |
 | TitaNet small, отпечаток голоса | NVIDIA NeMo | CC BY 4.0 |
+| [Silero VAD](https://github.com/snakers4/silero-vad), поиск пауз | Silero | MIT |
 | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), библиотека запуска | k2-fsa | Apache 2.0 |
 
 ---

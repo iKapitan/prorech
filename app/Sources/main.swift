@@ -50,6 +50,23 @@ enum Paths {
             && fm.fileExists(atPath: models.appendingPathComponent(
                 "sherpa-onnx-pyannote-segmentation-3-0/model.onnx").path)
             && fm.fileExists(atPath: models.appendingPathComponent("\(gigaam)/tokens.txt").path)
+            && fm.fileExists(atPath: models.appendingPathComponent("silero_vad.onnx").path)
+    }
+
+    /// Не хватает только модели пауз: обновление с 1.1, меньше мегабайта.
+    static var onlyVadMissing: Bool {
+        let models = home.appendingPathComponent("models")
+        let fm = FileManager.default
+        return hasPython && hasRecognizer
+            && fm.fileExists(atPath: models.appendingPathComponent("titanet.onnx").path)
+            && fm.fileExists(atPath: models.appendingPathComponent(
+                "sherpa-onnx-pyannote-segmentation-3-0/model.onnx").path)
+    }
+
+    /// Большая модель распознавания уже стоит.
+    static var hasRecognizer: Bool {
+        FileManager.default.fileExists(atPath: home.appendingPathComponent(
+            "models/\(gigaam)/tokens.txt").path)
     }
 }
 
@@ -1094,14 +1111,23 @@ struct SetupView: View {
             Spacer()
             Image(systemName: "arrow.down.circle")
                 .font(.system(size: 36, weight: .medium))
-            // На диске модель 1.0, значит это обновление: нужна только новая модель.
+            // Текст по тому, чего на диске не хватает: Python уже стоит, значит
+            // это обновление или оборванная установка, докачивается только недостающее.
+            let update = Paths.hasPython
             Text(running ? m.setupStep
-                 : Paths.isUpgrade ? "Осталось докачать новую модель распознавания"
-                 : "Осталось докачать движок и модели")
+                 : !Paths.hasPython ? "Осталось докачать движок и модели"
+                 : Paths.onlyVadMissing ? "Осталось докачать обновление"
+                 : !Paths.hasRecognizer ? "Осталось докачать новую модель распознавания"
+                 : "Осталось докачать недостающие модели")
                 .font(.system(size: 18, weight: .semibold))
-            Text(Paths.isUpgrade
-                 ? "Один раз, около 170 МБ. Новая модель быстрее, ставит знаки препинания и пишет латиницу и цифры. Записи по-прежнему никуда не уходят."
-                 : "Один раз, около 400 МБ, обычно 5-10 минут. Дальше расшифровка работает без интернета, записи никуда не уходят.")
+            Text(running ? "Скачиваю и проверяю файлы. Записи никуда не уходят."
+                 : !Paths.hasPython
+                 ? "Один раз, около 400 МБ, обычно 5-10 минут. Дальше расшифровка работает без интернета, записи никуда не уходят."
+                 : Paths.onlyVadMissing
+                 ? "Меньше мегабайта, несколько секунд. Реплики больше не рвутся посреди фразы между говорящими."
+                 : !Paths.hasRecognizer
+                 ? "Около 170 МБ, один раз. Модель быстрее, ставит знаки препинания и пишет латиницу и цифры. Записи по-прежнему никуда не уходят."
+                 : "Меньше 50 МБ, около минуты. Записи по-прежнему никуда не уходят.")
                 .font(.system(size: 13, weight: .medium)).foregroundColor(.kpStone)
                 .multilineTextAlignment(.center).frame(maxWidth: 420)
             if running {
@@ -1111,7 +1137,7 @@ struct SetupView: View {
                     ProgressView().controlSize(.small)
                 }
             } else {
-                Button(Paths.isUpgrade ? "Докачать" : "Установить") { m.setup() }
+                Button(update ? "Докачать" : "Установить") { m.setup() }
                     .buttonStyle(.borderedProminent).tint(.kpAcid).controlSize(.large)
             }
             Spacer()
