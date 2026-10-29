@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # ПРОРЕЧЬ, транскрибация от Kirov Pro: локальное распознавание русской речи с разметкой
-# говорящих. Интернет не нужен. Распознавание GigaAM v2 (Сбер), разделение
-# по голосам pyannote segmentation 3.0 плюс TitaNet, всё через sherpa-onnx.
+# говорящих. Интернет не нужен. Распознавание GigaAM v3 со знаками препинания
+# (Сбер), разделение по голосам pyannote segmentation 3.0 плюс TitaNet, всё через
+# sherpa-onnx.
 #
 # Запуск: python prorech.py [-n ГОВОРЯЩИХ] [-t ПОРОГ] файл [файл ...]
 # Результат ложится рядом с аудио: встреча.m4a даёт встреча.txt.
 # Флаг --progress печатает служебные строки для приложения:
+#   @длина 754.2     длина записи в секундах
 #   @голоса 0.42     доля пройденного разделения по голосам
 #   @текст 0.80      доля распознанных реплик
 #   @готово ПУТЬ     готовый текст
@@ -30,6 +32,10 @@ HOME = os.environ.get("PRORECH_HOME") or os.path.expanduser(
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Модели ищутся в папке установки, а рядом со скриптом на случай ручного запуска.
 MODEL_DIRS = [os.path.join(HOME, "models"), os.path.join(HERE, "models")]
+# v3 со знаками сменила v2 в версии 1.1: вдвое быстрее, находит больше речи,
+# пишет латиницу, цифры и знаки препинания. Имя папки то же в setup-engine.sh
+# и в приложении (Paths.gigaam).
+GIGAAM = "sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16"
 
 PROGRESS = False
 
@@ -106,7 +112,7 @@ def load_zameny():
 
 
 def load_recognizer():
-    mdir = find_one("sherpa-onnx-nemo-transducer-giga-am*")
+    mdir = find_one(GIGAAM)
     return sherpa_onnx.OfflineRecognizer.from_transducer(
         encoder=glob.glob(f"{mdir}/encoder*.onnx")[0],
         decoder=glob.glob(f"{mdir}/decoder*.onnx")[0],
@@ -132,6 +138,7 @@ def transcribe(path, rec, sd, pairs):
     t0 = time.time()
     samples = to_samples(path)
     minutes = len(samples) / 16000 / 60
+    emit("длина", f"{len(samples) / 16000:.1f}")
 
     def on_chunk(done, total):
         emit("голоса", f"{done / max(total, 1):.3f}")

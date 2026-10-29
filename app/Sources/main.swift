@@ -24,17 +24,83 @@ enum Paths {
     static var zameny: URL { home.appendingPathComponent("zameny.txt") }
     static var script: URL? { Bundle.main.url(forResource: "prorech", withExtension: "py") }
     static var setup: URL? { Bundle.main.url(forResource: "setup-engine", withExtension: "sh") }
+    /// Копии готовых текстов и их список: история живёт отдельно от записей,
+    /// поэтому переживает перенос и удаление текста рядом с записью.
+    static var historyDir: URL { home.appendingPathComponent("history") }
+    static var historyIndex: URL { historyDir.appendingPathComponent("history.json") }
+
+    /// Модель распознавания, имя папки то же в engine/prorech.py и setup-engine.sh.
+    /// У кого стоит версия 1.0 с GigaAM v2, движок считается неготовым,
+    /// и установщик докачивает только новую модель.
+    static let gigaam = "sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16"
+
+    static var hasPython: Bool { FileManager.default.isExecutableFile(atPath: python.path) }
+
+    /// На диске модель версии 1.0: значит это обновление, докачать нужно только модель.
+    static var isUpgrade: Bool {
+        FileManager.default.fileExists(atPath: home.appendingPathComponent(
+            "models/sherpa-onnx-nemo-transducer-giga-am-v2-russian-2025-04-19").path)
+    }
 
     static var engineReady: Bool {
         let fm = FileManager.default
         let models = home.appendingPathComponent("models")
-        let giga = (try? fm.contentsOfDirectory(atPath: models.path))?
-            .contains { $0.hasPrefix("sherpa-onnx-nemo-transducer-giga-am") } ?? false
-        return fm.isExecutableFile(atPath: python.path)
+        return hasPython
             && fm.fileExists(atPath: models.appendingPathComponent("titanet.onnx").path)
             && fm.fileExists(atPath: models.appendingPathComponent(
                 "sherpa-onnx-pyannote-segmentation-3-0/model.onnx").path)
-            && giga
+            && fm.fileExists(atPath: models.appendingPathComponent("\(gigaam)/tokens.txt").path)
+    }
+}
+
+// MARK: - История расшифровок
+
+struct HistoryItem: Codable, Identifiable, Equatable {
+    let id: String
+    let date: Date
+    let title: String       // имя записи без расширения
+    let source: String      // путь к записи, как он был в момент расшифровки
+    let seconds: Double?    // длина записи, если движок её сообщил
+    let speakers: Int
+
+    /// Своя папка на каждую расшифровку, файл назван по записи: при отправке
+    /// получатель видит «встреча.txt», а не служебный номер.
+    var folder: URL { Paths.historyDir.appendingPathComponent(id) }
+    var textURL: URL { folder.appendingPathComponent("\(title).txt") }
+
+    /// Дата и длина: для строки списка, она узкая.
+    var short: String {
+        var parts = [HistoryItem.dateFormat.string(from: date)]
+        if let s = seconds, s > 0 { parts.append("\(max(1, Int((s / 60).rounded()))) мин") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Полная подпись над текстом: ещё и сколько говорящих.
+    var meta: String {
+        speakers > 0 ? short + " · " + HistoryItem.speakersText(speakers) : short
+    }
+
+    static let dateFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "ru_RU")
+        f.dateFormat = "d MMM, HH:mm"
+        return f
+    }()
+
+    static func speakersText(_ n: Int) -> String {
+        // «1 говорящий», «21 говорящий», в остальных случаях «говорящих».
+        let word = n % 10 == 1 && n % 100 != 11 ? "говорящий" : "говорящих"
+        return "\(n) \(word)"
+    }
+
+    /// Говорящие считаются по разметке строк «[мм:сс] Говорящий X:».
+    static func countSpeakers(_ text: String) -> Int {
+        let re = try! NSRegularExpression(pattern: #"^\[[0-9:]+\] Говорящий ([A-Z]):"#,
+                                          options: .anchorsMatchLines)
+        let ns = text as NSString
+        let found = re.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            .map { ns.substring(with: $0.range(at: 1)) }
+        return Set(found).count
     }
 }
 
@@ -108,12 +174,17 @@ final class Model: ObservableObject {
     @Published var speakers = 0
     @Published var queueCount = 0
     @Published var dropHover = false
+    @Published var history: [HistoryItem] = Model.loadHistory()
+    @Published var showHistory = false
+    @Published var selectedID: String?
 
     private var process: Process?
     private var queue: [URL] = []
     private var resultURL: URL?
+    private var resultSeconds: Double?
     private var lastError = ""
     private var cancelled = false
+    private var textCache: [String: String] = [:]
     private let io = DispatchQueue(label: "prorech.io")
 
     // Очередь: можно бросить несколько записей, они пойдут по одной.
@@ -121,6 +192,7 @@ final class Model: ObservableObject {
         dlog("open \(urls.map(\.path)) phase=\(phase)")
         let files = urls.filter { $0.isFileURL && !$0.hasDirectoryPath }
         guard !files.isEmpty else { return }
+        showHistory = false
         if phase == .done { doneURLs = [] }
         queue.append(contentsOf: files)
         queueCount = queue.count
@@ -155,6 +227,7 @@ final class Model: ObservableObject {
         progress = 0
         startedAt = Date()
         resultURL = nil
+        resultSeconds = nil
         lastError = ""
         cancelled = false
         phase = .working
@@ -172,6 +245,8 @@ final class Model: ObservableObject {
         let tag = parts.first ?? ""
         let value = parts.count > 1 ? parts[1] : ""
         switch tag {
+        case "длина":
+            resultSeconds = Double(value)
         case "голоса":
             stage = "Разделяю по голосам"
             progress = 0.35 * (Double(value) ?? 0)
@@ -202,7 +277,9 @@ final class Model: ObservableObject {
         if code == 0, FileManager.default.fileExists(atPath: out.path) {
             doneURLs.append(out)
             resultText = (try? String(contentsOf: out, encoding: .utf8)) ?? ""
+            addHistory(text: resultText, source: source)
             if queue.isEmpty {
+                showHistory = false
                 phase = .done
                 NSApp.requestUserAttention(.informationalRequest)
             } else {
@@ -210,6 +287,7 @@ final class Model: ObservableObject {
             }
         } else {
             let msg = lastError.isEmpty ? "Расшифровка не удалась." : lastError
+            showHistory = false
             phase = .failed(msg.prefix(1).uppercased() + msg.dropFirst())
             queue.removeAll()
             queueCount = 0
@@ -266,6 +344,107 @@ final class Model: ObservableObject {
             return nil
         }
         return Double(line[r].dropLast())
+    }
+
+    // MARK: история
+
+    /// Запись списка читается сама по себе: одна битая не обнуляет остальные.
+    private struct Lenient: Decodable {
+        let item: HistoryItem?
+        init(from decoder: Decoder) throws {
+            item = try? decoder.singleValueContainer().decode(HistoryItem.self)
+        }
+    }
+
+    static func loadHistory() -> [HistoryItem] {
+        guard let data = try? Data(contentsOf: Paths.historyIndex) else { return [] }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        let rows = try? dec.decode([Lenient].self, from: data)
+        if rows == nil || rows!.contains(where: { $0.item == nil }) {
+            // Испорченный список не затирается следующим сохранением: копия рядом.
+            let stamp = Int(Date().timeIntervalSince1970)
+            try? FileManager.default.copyItem(
+                at: Paths.historyIndex,
+                to: Paths.historyDir.appendingPathComponent("history-\(stamp).bad.json"))
+        }
+        let items = (rows ?? []).compactMap(\.item)
+        // Запись без файла текста в списке не держим: показать её нечем.
+        return items.filter { FileManager.default.fileExists(atPath: $0.textURL.path) }
+            .sorted { $0.date > $1.date }
+    }
+
+    private func saveHistory() {
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .iso8601
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? enc.encode(history) else { return }
+        try? data.write(to: Paths.historyIndex, options: .atomic)
+    }
+
+    private func addHistory(text: String, source: URL) {
+        let item = HistoryItem(id: UUID().uuidString, date: Date(),
+                               title: source.deletingPathExtension().lastPathComponent,
+                               source: source.path, seconds: resultSeconds,
+                               speakers: HistoryItem.countSpeakers(text))
+        do {
+            try FileManager.default.createDirectory(at: item.folder,
+                                                    withIntermediateDirectories: true)
+            try text.write(to: item.textURL, atomically: true, encoding: .utf8)
+        } catch {
+            dlog("история: не записан текст: \(error)")
+            return
+        }
+        textCache[item.id] = text
+        history.insert(item, at: 0)
+        saveHistory()
+    }
+
+    /// Только для снимков экранов: история из образцов, без записи на диск.
+    func seedForSnapshot(_ items: [HistoryItem], texts: [String: String]) {
+        textCache = texts
+        history = items
+        selectedID = items.first?.id
+    }
+
+    func text(of item: HistoryItem) -> String {
+        if let t = textCache[item.id] { return t }
+        let t = (try? String(contentsOf: item.textURL, encoding: .utf8)) ?? ""
+        textCache[item.id] = t
+        return t
+    }
+
+    func delete(_ item: HistoryItem) {
+        try? FileManager.default.removeItem(at: item.folder)
+        textCache[item.id] = nil
+        history.removeAll { $0.id == item.id }
+        if selectedID == item.id { selectedID = history.first?.id }
+        saveHistory()
+    }
+
+    func openHistory() {
+        if selectedID == nil || !history.contains(where: { $0.id == selectedID }) {
+            selectedID = history.first?.id
+        }
+        showHistory = true
+    }
+
+    /// «Сохранить как…» из меню: то, что сейчас на экране.
+    func saveAs() {
+        if showHistory {
+            if let item = history.first(where: { $0.id == selectedID }) {
+                Export.save(text: text(of: item), title: item.title, date: item.date)
+            }
+        } else if phase == .done, !resultText.isEmpty {
+            let title = doneURLs.last?.deletingPathExtension().lastPathComponent ?? "Расшифровка"
+            Export.save(text: resultText, title: title, date: Date())
+        }
+    }
+
+    var inSetup: Bool { phase == .needsSetup || phase == .settingUp }
+
+    var canSave: Bool {
+        showHistory ? selectedID != nil : (phase == .done && !resultText.isEmpty)
     }
 
     func openZameny() {
@@ -391,6 +570,111 @@ struct TextPreview: NSViewRepresentable {
     }
 }
 
+// MARK: - Сохранить как: документ Word или простой текст
+
+enum Export {
+    enum Format: Int { case docx = 0, txt = 1 }
+
+    static let docxType = UTType("org.openxmlformats.wordprocessingml.document") ?? .data
+    private static let formatKey = "exportFormat"
+
+    static func save(text: String, title: String, date: Date) {
+        let panel = NSSavePanel()
+        panel.title = "Сохранить расшифровку"
+        panel.prompt = "Сохранить"
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = title
+        let picker = FormatPicker(panel: panel)
+        // Последний выбранный формат запоминается, в первый раз предлагается Word.
+        picker.apply(Format(rawValue: UserDefaults.standard.integer(forKey: formatKey)) ?? .docx)
+        panel.accessoryView = picker.view
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        UserDefaults.standard.set(picker.format.rawValue, forKey: formatKey)
+        do {
+            switch picker.format {
+            case .txt: try text.write(to: url, atomically: true, encoding: .utf8)
+            case .docx: try docx(text: text, title: title, date: date).write(to: url, options: .atomic)
+            }
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Не удалось сохранить"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    /// Документ Word средствами macOS: заголовок, дата, затем реплики, время
+    /// приглушено, говорящий жирным. Шрифт Arial есть и у Word, и на маке.
+    static func docx(text: String, title: String, date: Date) throws -> Data {
+        let font = NSFont(name: "Arial", size: 11) ?? .systemFont(ofSize: 11)
+        let bold = NSFont(name: "Arial-BoldMT", size: 11) ?? .boldSystemFont(ofSize: 11)
+        let head = NSFont(name: "Arial-BoldMT", size: 16) ?? .boldSystemFont(ofSize: 16)
+        let grey = NSColor(srgbRed: 0.38, green: 0.38, blue: 0.37, alpha: 1)
+        let para = NSMutableParagraphStyle()
+        para.paragraphSpacing = 6
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "ru_RU")
+        f.dateFormat = "d MMMM yyyy, HH:mm"
+        let out = NSMutableAttributedString(string: title + "\n", attributes: [
+            .font: head, .foregroundColor: NSColor.black, .paragraphStyle: para])
+        out.append(NSAttributedString(
+            string: "Расшифровано в ПРОРЕЧЬ \(f.string(from: date))\n\n",
+            attributes: [.font: font, .foregroundColor: grey, .paragraphStyle: para]))
+        let body = NSMutableAttributedString(string: text, attributes: [
+            .font: font, .foregroundColor: NSColor.black, .paragraphStyle: para])
+        let ns = text as NSString
+        let re = try! NSRegularExpression(pattern: #"^(\[[0-9:]+\]) (Говорящий [A-Z]:)"#,
+                                          options: .anchorsMatchLines)
+        for m in re.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            body.addAttribute(.foregroundColor, value: grey, range: m.range(at: 1))
+            body.addAttribute(.font, value: bold, range: m.range(at: 2))
+        }
+        out.append(body)
+        return try out.data(from: NSRange(location: 0, length: out.length), documentAttributes: [
+            .documentType: NSAttributedString.DocumentType.officeOpenXML])
+    }
+}
+
+/// Выбор формата внизу окна сохранения. Смена формата меняет и расширение в имени.
+final class FormatPicker: NSObject {
+    private weak var panel: NSSavePanel?
+    private let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+    let view: NSView
+    private(set) var format: Export.Format = .docx
+
+    init(panel: NSSavePanel) {
+        self.panel = panel
+        popup.addItems(withTitles: ["Документ Word (.docx)", "Текст (.txt)"])
+        let label = NSTextField(labelWithString: "Формат:")
+        let stack = NSStackView(views: [label, popup])
+        stack.orientation = .horizontal
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 20, bottom: 10, right: 20)
+        stack.setFrameSize(stack.fittingSize)
+        view = stack
+        super.init()
+        popup.target = self
+        popup.action = #selector(changed)
+    }
+
+    @objc private func changed() {
+        apply(Export.Format(rawValue: popup.indexOfSelectedItem) ?? .docx)
+    }
+
+    func apply(_ f: Export.Format) {
+        format = f
+        popup.selectItem(at: f.rawValue)
+        guard let panel else { return }
+        let type: UTType = f == .docx ? Export.docxType : .plainText
+        panel.allowedContentTypes = [type]
+        let name = panel.nameFieldStringValue as NSString
+        let base = ["docx", "txt"].contains(name.pathExtension.lowercased())
+            ? name.deletingPathExtension : name as String
+        panel.nameFieldStringValue = base + "." + (f == .docx ? "docx" : "txt")
+    }
+}
+
 // MARK: - Экраны
 
 struct ContentView: View {
@@ -406,17 +690,24 @@ struct ContentView: View {
                         .font(.system(size: 12.5, weight: .medium)).foregroundColor(.kpStone)
                 }
                 Spacer()
+                if m.showHistory || !m.inSetup {
+                    HistoryButton(m: m)
+                }
             }
             .padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 18)
 
             Group {
-                switch m.phase {
-                case .needsSetup: SetupView(m: m, running: false)
-                case .settingUp: SetupView(m: m, running: true)
-                case .idle: IdleView(m: m)
-                case .working: WorkingView(m: m)
-                case .done: DoneView(m: m)
-                case .failed(let msg): FailedView(m: m, message: msg)
+                if m.showHistory {
+                    HistoryView(m: m)
+                } else {
+                    switch m.phase {
+                    case .needsSetup: SetupView(m: m, running: false)
+                    case .settingUp: SetupView(m: m, running: true)
+                    case .idle: IdleView(m: m)
+                    case .working: WorkingView(m: m)
+                    case .done: DoneView(m: m)
+                    case .failed(let msg): FailedView(m: m, message: msg)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -434,7 +725,7 @@ struct ContentView: View {
             .overlay(alignment: .top) { Rectangle().fill(Color.kpHair).frame(height: 1) }
         }
         .foregroundColor(.kpInk)
-        .frame(minWidth: 600, minHeight: 520)
+        .frame(minWidth: 640, minHeight: 540)
         .background(Color.kpBg)
         .onDrop(of: [.fileURL], isTargeted: $m.dropHover) { providers in
             for p in providers {
@@ -523,7 +814,7 @@ struct WorkingView: View {
                         .font(.system(size: 12.5, weight: .medium)).foregroundColor(.kpStone)
                 }
             }
-            Text("Обычно расшифровка занимает около четверти длины записи. Окно можно свернуть: когда текст будет готов, значок в Dock подпрыгнет.")
+            Text("На маке с чипом M расшифровка обычно занимает около десятой части длины записи. Окно можно свернуть: когда текст будет готов, значок в Dock подпрыгнет.")
                 .font(.system(size: 13, weight: .medium)).foregroundColor(.kpStone)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 6)
@@ -561,21 +852,235 @@ struct DoneView: View {
                 ShareLink(items: m.doneURLs) {
                     Label("Отправить", systemImage: "square.and.arrow.up")
                 }
-                .buttonStyle(.borderedProminent).tint(.kpAcid).controlSize(.large)
-                Button("Показать в Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting(m.doneURLs)
-                }
-                .controlSize(.large)
-                Button(copied ? "Скопировано" : "Скопировать текст") {
+                .buttonStyle(.borderedProminent).tint(.kpAcid)
+                Button("Сохранить как…") { m.saveAs() }
+                Button(copied ? "Скопировано" : "Скопировать") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(m.resultText, forType: .string)
                     copied = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
                 }
-                .controlSize(.large)
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting(m.doneURLs)
+                } label: {
+                    Image(systemName: "folder")
+                }
+                .help("Показать в Finder")
                 Spacer()
-                Button("Новая запись") { m.reset() }.controlSize(.large)
+                Button("Новая запись") { m.reset() }
             }
+            .controlSize(.large)
+        }
+    }
+}
+
+// MARK: - История: список слева, текст справа
+
+/// Кнопка в шапке. Цвета как у переключателя «Сколько человек говорит»:
+/// системная подсветка синяя, а синего в бренде нет.
+struct HistoryButton: View {
+    @ObservedObject var m: Model
+
+    var body: some View {
+        let on = m.showHistory
+        Button {
+            if on { m.showHistory = false } else { m.openHistory() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "clock.arrow.circlepath")
+                Text(on ? "Закрыть историю" : "История")
+                if !on && !m.history.isEmpty {
+                    Text("\(m.history.count)").foregroundColor(.kpStone)
+                }
+            }
+            .font(.system(size: 13, weight: .medium))
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(on ? Color.kpInk : Color.kpCard)
+            .foregroundColor(on ? Color.kpBg : Color.kpInk)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(on ? Color.clear : Color.kpHair))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct HistoryView: View {
+    @ObservedObject var m: Model
+    @State private var query = ""
+    @State private var confirmDelete = false
+    @State private var copied = false
+
+    private var found: [HistoryItem] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return m.history }
+        return m.history.filter {
+            $0.title.lowercased().contains(q) || m.text(of: $0).lowercased().contains(q)
+        }
+    }
+
+    private var selected: HistoryItem? { m.history.first { $0.id == m.selectedID } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if m.phase == .working {
+                // Расшифровка идёт дальше, пока открыта история.
+                HStack(spacing: 10) {
+                    ProgressView(value: m.progress).tint(.kpAcid).frame(width: 90)
+                    Text("Расшифровываю \(m.fileName)")
+                        .font(.system(size: 12.5, weight: .medium)).foregroundColor(.kpStone)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button("Показать") { m.showHistory = false }
+                        .buttonStyle(.link).font(.system(size: 12.5, weight: .medium))
+                }
+            }
+            if m.history.isEmpty {
+                empty
+            } else {
+                HStack(alignment: .top, spacing: 14) {
+                    list.frame(width: 220)
+                    if let item = selected {
+                        detail(item)
+                    } else {
+                        Text("Выберите расшифровку слева")
+                            .font(.system(size: 13, weight: .medium)).foregroundColor(.kpStone)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+            }
+        }
+    }
+
+    private var empty: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "clock.arrow.circlepath").font(.system(size: 34, weight: .medium))
+            Text("Здесь будут все расшифровки").font(.system(size: 18, weight: .semibold))
+            Text("Каждый готовый текст сохраняется в истории и остаётся здесь, даже если файл рядом с записью перенести или удалить.")
+                .font(.system(size: 13, weight: .medium)).foregroundColor(.kpStone)
+                .multilineTextAlignment(.center).frame(maxWidth: 420)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var list: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundColor(.kpStone)
+                TextField("Поиск по истории", text: $query)
+                    .textFieldStyle(.plain).font(.system(size: 13, weight: .medium))
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(Color.kpCard)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.kpHair))
+
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(found) { item in row(item) }
+                    if found.isEmpty {
+                        Text("Ничего не нашлось")
+                            .font(.system(size: 12.5, weight: .medium)).foregroundColor(.kpStone)
+                            .padding(.top, 16)
+                    }
+                }
+                .padding(4)
+            }
+            .background(Color.kpCard)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.kpHair))
+        }
+    }
+
+    private func row(_ item: HistoryItem) -> some View {
+        let on = item.id == m.selectedID
+        return Button { m.selectedID = item.id } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title).font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1).truncationMode(.middle)
+                Text(item.short).font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(on ? Color.kpBg.opacity(0.7) : .kpStone)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(on ? Color.kpInk : Color.clear)
+            .foregroundColor(on ? Color.kpBg : Color.kpInk)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func actions(_ item: HistoryItem, compact: Bool) -> some View {
+        HStack(spacing: 8) {
+            Button("Сохранить как…") {
+                Export.save(text: m.text(of: item), title: item.title, date: item.date)
+            }
+            .buttonStyle(.borderedProminent).tint(.kpAcid)
+            .fixedSize()
+            ShareLink(item: item.textURL) {
+                if compact {
+                    Image(systemName: "square.and.arrow.up")
+                } else {
+                    Label("Отправить", systemImage: "square.and.arrow.up")
+                }
+            }
+            .help("Отправить")
+            .fixedSize()
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(m.text(of: item), forType: .string)
+                copied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+            } label: {
+                if compact {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                } else {
+                    Text(copied ? "Скопировано" : "Скопировать")
+                }
+            }
+            .help("Скопировать текст")
+            .fixedSize()
+            Spacer(minLength: 8)
+            Button { confirmDelete = true } label: { Image(systemName: "trash") }
+                .help("Удалить из истории")
+                .fixedSize()
+        }
+    }
+
+    private func detail(_ item: HistoryItem) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title).font(.system(size: 16, weight: .semibold))
+                    .lineLimit(1).truncationMode(.middle)
+                Text(item.meta).font(.system(size: 12.5, weight: .medium)).foregroundColor(.kpStone)
+            }
+            TextPreview(text: m.text(of: item))
+                .background(Color.kpCard)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.kpHair))
+            // В узком окне подписи «Отправить» и «Скопировать» уходят в значки,
+            // чтобы «Сохранить как…» не обрезалось.
+            ViewThatFits(in: .horizontal) {
+                actions(item, compact: false)
+                actions(item, compact: true)
+            }
+        }
+        .confirmationDialog("Удалить расшифровку из истории?", isPresented: $confirmDelete) {
+            Button("Удалить", role: .destructive) {
+                // Дальше открывается соседняя запись из найденных, а не первая из всей истории.
+                let list = found
+                let i = list.firstIndex(of: item) ?? 0
+                let rest = list.filter { $0.id != item.id }
+                m.delete(item)
+                m.selectedID = rest.isEmpty ? m.history.first?.id : rest[min(i, rest.count - 1)].id
+            }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text("Текст рядом с записью, если он там есть, останется.")
         }
     }
 }
@@ -589,9 +1094,14 @@ struct SetupView: View {
             Spacer()
             Image(systemName: "arrow.down.circle")
                 .font(.system(size: 36, weight: .medium))
-            Text(running ? m.setupStep : "Осталось докачать движок и модели")
+            // На диске модель 1.0, значит это обновление: нужна только новая модель.
+            Text(running ? m.setupStep
+                 : Paths.isUpgrade ? "Осталось докачать новую модель распознавания"
+                 : "Осталось докачать движок и модели")
                 .font(.system(size: 18, weight: .semibold))
-            Text("Один раз, около 400 МБ, обычно 5-10 минут. Дальше расшифровка работает без интернета, записи никуда не уходят.")
+            Text(Paths.isUpgrade
+                 ? "Один раз, около 170 МБ. Новая модель быстрее, ставит знаки препинания и пишет латиницу и цифры. Записи по-прежнему никуда не уходят."
+                 : "Один раз, около 400 МБ, обычно 5-10 минут. Дальше расшифровка работает без интернета, записи никуда не уходят.")
                 .font(.system(size: 13, weight: .medium)).foregroundColor(.kpStone)
                 .multilineTextAlignment(.center).frame(maxWidth: 420)
             if running {
@@ -601,7 +1111,7 @@ struct SetupView: View {
                     ProgressView().controlSize(.small)
                 }
             } else {
-                Button("Установить") { m.setup() }
+                Button(Paths.isUpgrade ? "Докачать" : "Установить") { m.setup() }
                     .buttonStyle(.borderedProminent).tint(.kpAcid).controlSize(.large)
             }
             Spacer()
@@ -654,10 +1164,10 @@ enum Snapshot {
     static func run(to dir: URL) {
         let m = Model.shared
         let sample = """
-            [00:00] Говорящий A: добрый день давайте начнем с плана на неделю у нас три задачи
-            [00:05] Говорящий B: да согласен первая задача это сроки поставки оборудования их нужно подтвердить до пятницы
-            [00:12] Говорящий A: хорошо записываю кто возьмет вторую задачу
-            [00:17] Говорящий B: вторую возьму я а третью обсудим завтра утром
+            [00:00] Говорящий A: Добрый день. Давайте начнём с плана на неделю, у нас три задачи.
+            [00:05] Говорящий B: Да, согласен. Первая задача: сроки поставки оборудования, их нужно подтвердить до пятницы.
+            [00:12] Говорящий A: Хорошо, записываю. Кто возьмёт вторую задачу?
+            [00:17] Говорящий B: Вторую возьму я, а третью обсудим завтра в 10 утра в Zoom.
 
             """
         let txt = dir.appendingPathComponent("встреча.txt")
@@ -670,6 +1180,18 @@ enum Snapshot {
                 m.startedAt = Date().addingTimeInterval(-133); m.phase = .working }),
             ("3-gotovo", { m.doneURLs = [txt]; m.resultText = sample; m.phase = .done }),
             ("4-ustanovka", { m.phase = .needsSetup }),
+            ("5-istoriya", {
+                let now = Date()
+                let items = [
+                    HistoryItem(id: "s1", date: now, title: "встреча", source: txt.path,
+                                seconds: 1260, speakers: 2),
+                    HistoryItem(id: "s2", date: now.addingTimeInterval(-86400 * 2 - 5400),
+                                title: "созвон с подрядчиком", source: "", seconds: 2280, speakers: 3),
+                    HistoryItem(id: "s3", date: now.addingTimeInterval(-86400 * 6 - 9000),
+                                title: "интервью, часть 1", source: "", seconds: 3540, speakers: 2)]
+                m.seedForSnapshot(items, texts: ["s1": sample, "s2": sample, "s3": sample])
+                m.phase = .idle; m.showHistory = true }),
+            ("6-istoriya-pusto", { m.seedForSnapshot([], texts: [:]) }),
         ]
         func shoot(_ i: Int) {
             guard i < steps.count else { NSApp.terminate(nil); return }
@@ -704,11 +1226,19 @@ struct ProrechApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
-        .defaultSize(width: 680, height: 560)
+        .defaultSize(width: 720, height: 580)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Выбрать запись…") { model.pickFile() }
                     .keyboardShortcut("o")
+                Button("История") { model.openHistory() }
+                    .keyboardShortcut("y")
+                    .disabled(model.inSetup)
+                // Не в группе .saveItem: её замена убирает и «Закрыть» (Cmd + W).
+                Divider()
+                Button("Сохранить как…") { model.saveAs() }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+                    .disabled(!model.canSave)
             }
         }
     }

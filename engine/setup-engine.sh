@@ -11,7 +11,9 @@ set -euo pipefail
 DIR="${PRORECH_HOME:-$HOME/Library/Application Support/KirovPro/Prorech}"
 REL="https://github.com/k2-fsa/sherpa-onnx/releases/download"
 SHERPA_VERSION="1.13.8"
-GIGAAM="sherpa-onnx-nemo-transducer-giga-am-v2-russian-2025-04-19"
+# Имя папки модели то же в prorech.py и в приложении (Paths.gigaam).
+GIGAAM="sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16"
+GIGAAM_OLD="sherpa-onnx-nemo-transducer-giga-am-v2-russian-2025-04-19"
 SEG="sherpa-onnx-pyannote-segmentation-3-0"
 
 shag() { echo "@шаг $1"; }
@@ -44,11 +46,14 @@ skachat() {  # имя-файла ссылка sha256
 }
 
 if [ ! -f "models/$GIGAAM/tokens.txt" ]; then
-  shag "Скачиваю модель распознавания речи, 172 МБ"
+  shag "Скачиваю модель распознавания речи, 170 МБ"
   skachat gigaam.tar.bz2 "$REL/asr-models/$GIGAAM.tar.bz2" \
-    6c4bec4c4a70961fc4ec583bf5506089480a9a649c1816ef96b6e4fb8338cd71
+    f9620a0099019c6afcee26525ef9ed3297fa50dd5691c1902af0c948fc1a470b
   tar xjf models/gigaam.tar.bz2 -C models && rm models/gigaam.tar.bz2
 fi
+# Модель версии 1.0 больше не нужна, место освобождается только после того,
+# как новая встала целиком.
+[ -f "models/$GIGAAM/tokens.txt" ] && rm -rf "models/$GIGAAM_OLD"
 
 if [ ! -f "models/$SEG/model.onnx" ]; then
   shag "Скачиваю модель отрезков речи, 7 МБ"
