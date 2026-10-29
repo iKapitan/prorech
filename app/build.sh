@@ -1,11 +1,13 @@
 #!/bin/bash
 # Сборка «ПРОРЕЧЬ.app» для маков на Apple Silicon и Intel.
-# Нужен Xcode. Результат: dist/ПРОРЕЧЬ.app и dist/Prorech.zip для релиза.
+# Нужен Xcode. Результат: dist/Prorech.zip для релиза и само приложение в
+# dist/app.noindex/: папку с окончанием .noindex Spotlight и Launchpad не видят,
+# иначе каждая сборка появляется в Launchpad лишней копией ПРОРЕЧЬ.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-APP="dist/ПРОРЕЧЬ.app"
+APP="dist/app.noindex/ПРОРЕЧЬ.app"
 rm -rf dist build && mkdir -p build "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 for arch in arm64 x86_64; do

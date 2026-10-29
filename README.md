@@ -105,8 +105,8 @@ curl -fsSL https://raw.githubusercontent.com/iKapitan/prorech/main/uninstall.sh 
 
 ## Сборка из исходников
 
-Нужен Xcode. `bash app/build.sh` собирает `dist/ПРОРЕЧЬ.app` для Apple Silicon и Intel
-и архив `dist/Prorech.zip` для релиза.
+Нужен Xcode. `bash app/build.sh` собирает приложение для Apple Silicon и Intel в
+`dist/app.noindex/` (Launchpad эту папку не видит) и архив `dist/Prorech.zip` для релиза.
 
 ## Лицензии
 

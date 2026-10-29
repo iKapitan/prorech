@@ -34,6 +34,10 @@ enum Paths {
     /// и установщик докачивает только новую модель.
     static let gigaam = "sherpa-onnx-nemo-transducer-punct-giga-am-v3-russian-2025-12-16"
 
+    static var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+    }
+
     static var hasPython: Bool { FileManager.default.isExecutableFile(atPath: python.path) }
 
     /// На диске модель версии 1.0: значит это обновление, докачать нужно только модель.
@@ -732,7 +736,7 @@ struct ContentView: View {
             .padding(.bottom, 18)
 
             HStack {
-                Text("Kirov Pro · Цифровое ателье")
+                Text("Kirov Pro · Цифровое ателье · версия \(Paths.version)")
                     .font(.system(size: 11.5, weight: .medium)).foregroundColor(.kpStone)
                 Spacer()
                 Button("Словарь замен") { m.openZameny() }
