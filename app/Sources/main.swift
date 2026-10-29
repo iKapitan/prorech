@@ -198,6 +198,8 @@ final class Model: ObservableObject {
     @Published var history: [HistoryItem] = Model.loadHistory()
     @Published var showHistory = false
     @Published var selectedID: String?
+    /// Номер вышедшей новой версии, если она новее этой.
+    @Published var updateVersion: String?
 
     private var process: Process?
     private var queue: [URL] = []
@@ -696,6 +698,78 @@ final class FormatPicker: NSObject {
     }
 }
 
+// MARK: - Обновление: проверка на GitHub и кнопка, которая всё делает сама
+
+enum Updater {
+    static let latestURL = URL(string: "https://api.github.com/repos/iKapitan/prorech/releases/latest")!
+    static let installURL = "https://raw.githubusercontent.com/iKapitan/prorech/main/install.sh"
+
+    /// Спрашивает GitHub номер последнего релиза. Уходит только этот запрос,
+    /// записи и тексты никуда не отправляются. Без интернета молчит.
+    static func check(_ done: @escaping (String?) -> Void) {
+        var req = URLRequest(url: latestURL, timeoutInterval: 15)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: req) { data, _, _ in
+            guard let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = obj["tag_name"] as? String else { return done(nil) }
+            let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            done(newer(latest, than: Paths.version) ? latest : nil)
+        }.resume()
+    }
+
+    /// «1.10» новее «1.9»: номера сравниваются числами по частям.
+    static func newer(_ a: String, than b: String) -> Bool {
+        let x = a.split(separator: ".").map { Int($0) ?? 0 }
+        let y = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(x.count, y.count) {
+            let p = i < x.count ? x[i] : 0, q = i < y.count ? y[i] : 0
+            if p != q { return p > q }
+        }
+        return false
+    }
+
+    /// Открывает Терминал со скриптом обновления и закрывает программу:
+    /// установщик заменит её новой версией, докачает модели и откроет снова.
+    static func run() {
+        let script = """
+            #!/bin/bash
+            clear
+            echo "Обновляю ПРОРЕЧЬ. Ничего нажимать не нужно, в конце программа откроется сама."
+            echo
+            # ждём, пока старая версия закроется, не дольше 10 секунд
+            for i in $(seq 1 20); do
+              pgrep -qf "ПРОРЕЧЬ.app/Contents/MacOS/Prorech" || break
+              sleep 0.5
+            done
+            f="$(mktemp -t prorech-install)"
+            if curl -fsSL -o "$f" \(installURL) && bash "$f"; then
+              echo
+              echo "Готово. Это окно Терминала можно закрыть."
+            else
+              echo
+              echo "Обновить не получилось. Проверьте интернет и нажмите «Обновить» в программе ещё раз."
+            fi
+            rm -f "$f"
+
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Обновить ПРОРЕЧЬ.command")
+        do {
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Не удалось начать обновление"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+            return
+        }
+        NSWorkspace.shared.open(url)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
+    }
+}
+
 // MARK: - Экраны
 
 struct ContentView: View {
@@ -739,6 +813,14 @@ struct ContentView: View {
                 Text("Kirov Pro · Цифровое ателье · версия \(Paths.version)")
                     .font(.system(size: 11.5, weight: .medium)).foregroundColor(.kpStone)
                 Spacer()
+                if let v = m.updateVersion {
+                    Button("Вышла версия \(v), обновить") { Updater.run() }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold)).foregroundColor(.kpAcid)
+                        .disabled(m.phase == .working || m.inSetup)
+                        .help("Откроется Терминал, обновление пройдёт само, программа откроется заново")
+                        .padding(.trailing, 14)
+                }
                 Button("Словарь замен") { m.openZameny() }
                     .buttonStyle(.link).font(.system(size: 12, weight: .medium))
             }
@@ -1181,6 +1263,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let args = CommandLine.arguments
+        if !args.contains("--snapshot") {
+            Updater.check { v in DispatchQueue.main.async { Model.shared.updateVersion = v } }
+        }
         if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
             if args.contains("--light") { NSApp.appearance = NSAppearance(named: .aqua) }
             Snapshot.run(to: URL(fileURLWithPath: args[i + 1]))
@@ -1222,6 +1307,7 @@ enum Snapshot {
                 m.seedForSnapshot(items, texts: ["s1": sample, "s2": sample, "s3": sample])
                 m.phase = .idle; m.showHistory = true }),
             ("6-istoriya-pusto", { m.seedForSnapshot([], texts: [:]) }),
+            ("7-obnovlenie", { m.showHistory = false; m.phase = .idle; m.updateVersion = "1.4" }),
         ]
         func shoot(_ i: Int) {
             guard i < steps.count else { NSApp.terminate(nil); return }
